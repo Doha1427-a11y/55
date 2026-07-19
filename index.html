@@ -776,6 +776,7 @@
                     if(window.myProfileData.status === 'approved') {
                         document.getElementById('cv_name').value = window.myProfileData.fullName||''; document.getElementById('cv_id').value = window.myProfileData.nationalId||''; document.getElementById('cv_email').value = window.myProfileData.email||''; document.getElementById('cv_phone').value = window.myProfileData.phone||''; document.getElementById('cv_edu').value = window.myProfileData.edu||''; document.getElementById('cv_years').value = window.myProfileData.years||''; document.getElementById('cv_license').value = window.myProfileData.license||''; document.getElementById('cv_exp').value = window.myProfileData.exp||''; document.getElementById('cv_portfolio').value = window.myProfileData.portfolio||'';
                         window.navigate('view-specialist-dashboard'); window.switchSpecTab('home');
+                        window.loadUserChats();
                     } else { window.navigate('view-waiting-room'); window.listenToStatus(u.uid, 'spec'); }
                     return; 
                 }
@@ -784,6 +785,7 @@
                     window.currAccountType = 'org'; window.myProfileData = profileData;
                     if(window.myProfileData.status === 'approved') {
                         window.navigate('view-org-dashboard'); window.switchOrgTab('home');
+                        window.loadUserChats();
                     } else { window.navigate('view-waiting-room'); window.listenToStatus(u.uid, 'org'); }
                     return;
                 }
@@ -791,10 +793,93 @@
             } catch (e) { showToast('خطأ في الاتصال', true); }
         };
 
+        window.userNamesCache = {};
+        window.loadUserChats = () => {
+            const u = auth.currentUser; if(!u) return;
+            const isSpec = window.currAccountType === 'spec';
+            const listId = isSpec ? 'spec-requests-list' : 'org-requests-list';
+            const listEl = document.getElementById(listId);
+            
+            const q = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
+            onSnapshot(q, async (snap) => {
+                let chats = {};
+                snap.forEach(doc => {
+                    const m = doc.data();
+                    if(m.chatId && m.chatId.includes(u.uid)) {
+                        if(!chats[m.chatId] || (m.timestamp?.seconds > (chats[m.chatId].latest.timestamp?.seconds || 0))) {
+                            chats[m.chatId] = { latest: m, chatId: m.chatId };
+                        }
+                    }
+                });
+                
+                if(Object.keys(chats).length === 0) { 
+                    listEl.innerHTML = '<div class="text-center p-4 text-secondary text-sm">لا توجد محادثات نشطة حالياً</div>'; 
+                    return; 
+                }
+                
+        // Fixed Load User Chats (Fixing the SyntaxError here)
+        window.loadUserChats = async () => {
+            const u = auth.currentUser; 
+            if(!u) return;
+            const isSpec = window.currAccountType === 'spec';
+            const listId = isSpec ? 'spec-requests-list' : 'org-requests-list';
+            const listEl = document.getElementById(listId);
+            if(!listEl) return;
+            
+            const q = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
+            onSnapshot(q, async (snap) => {
+                let chats = {};
+                snap.forEach(doc => {
+                    const m = doc.data();
+                    if(m.chatId && m.chatId.includes(u.uid)) {
+                        if(!chats[m.chatId] || (m.timestamp?.seconds > (chats[m.chatId].latest.timestamp?.seconds || 0))) {
+                            chats[m.chatId] = { latest: m, chatId: m.chatId };
+                        }
+                    }
+                });
+                
+                listEl.innerHTML = '';
+                for(const chatId of Object.keys(chats)) {
+                    const parts = chatId.split('_');
+                    const otherId = isSpec ? parts[2] : parts[1];
+                    const otherName = window.userNamesCache[otherId] || 'مستخدم';
+                    const roleArg = isSpec ? 'spec' : 'org';
+                    
+                    // استخدام دالة إضافية بدلاً من وضع الكود مباشرة في الـ onclick لتجنب مشاكل علامات الاقتباس
+                    const chatDiv = document.createElement('div');
+                    chatDiv.className = "p-3 bg-white border border-outline-variant rounded-xl cursor-pointer hover:border-primary transition-all shadow-sm mb-2";
+                    chatDiv.innerHTML = `<div class="font-bold text-primary text-sm">${otherName}</div>
+                                        <div class="text-xs text-secondary truncate">${chats[chatId].latest.isContract ? '📄 عقد اتفاق' : (chats[chatId].latest.text || '')}</div>`;
+                    chatDiv.onclick = () => window.openChatRoom(chatId, otherName, roleArg);
+                    listEl.appendChild(chatDiv);
+                }
+            });
+        };
+
+        // Fixed Open Chat Room (Cleaning up subscription)
+        window.openChatRoom = (chatId, otherName, role) => {
+            if(window.chatUnsub) window.chatUnsub(); // Cleanup previous listener
+            
+            const prefix = role === 'spec' ? 'spec' : 'org';
+            const msgsDiv = document.getElementById(`${prefix}-chat-messages`);
+            if(!msgsDiv) return;
+            
+            window.chatUnsub = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), (snap) => {
+                let msgs = [];
+                snap.forEach(d => { if(d.data().chatId === chatId) msgs.push({...d.data(), id: d.id}); });
+                msgs.sort((a,b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0));
+                
+                msgsDiv.innerHTML = '';
+                msgs.forEach(m => {
+                    msgsDiv.innerHTML += `<div class="p-2 border-b text-sm">${m.text || '📄 عقد اتفاق'}</div>`;
+                });
+            });
+        };
+
         window.listenToStatus = async (uid, type) => {
             onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', type==='spec'?'specialists':'organizations', uid), (snap) => {
                 if(snap.exists() && snap.data().status === 'approved') { showToast('تم الاعتماد! جاري الدخول...'); setTimeout(() => { window.checkAndGoToDashboard(); }, 1500); }
-            });
+            }, (err) => console.error(err));
         };
 
         window.fetchCRData = async () => {
@@ -936,27 +1021,7 @@
                         chatId: chatId, senderId: u.uid, text: 'مرحباً، أود التقديم للعمل معكم وقد أرفقت سيرتي الذاتية لتقييمها.', timestamp: serverTimestamp() 
                     });
 
-                    // إضافة المحادثة لقائمة المنشأة
-                     const orgList = document.getElementById('org-requests-list');
-                     if(orgList) {
-                        orgList.innerHTML = `
-                        <div onclick="openChatRoom('${chatId}', '${window.myProfileData.fullName}', 'org')" class="p-3 bg-white border border-blue-200 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors shadow-sm mb-2">
-                            <div class="font-bold text-slate-800 text-sm flex justify-between"><span>${window.myProfileData.fullName}</span><span class="text-[10px] text-slate-500">الآن</span></div>
-                            <div class="text-xs text-slate-500 mt-1 truncate">يود التقديم للعمل معكم...</div>
-                        </div>
-                        ` + orgList.innerHTML.replace('جاري التحميل...', '');
-                     }
-
                     showToast('تم تقديم سيرتك الذاتية وإنشاء طلب تواصل مع ' + orgName);
-                    
-                    const list = document.getElementById('spec-requests-list');
-                    list.innerHTML = `
-                        <div onclick="openChatRoom('${chatId}', '${orgName}', 'spec')" class="p-3 bg-white border border-outline-variant rounded-xl cursor-pointer hover:bg-surface-container-low transition-colors shadow-sm mb-2 relative">
-                            <div class="font-bold text-primary text-sm flex justify-between"><span>${orgName}</span><span class="text-[10px] text-secondary">الآن</span></div>
-                            <div class="text-xs text-secondary mt-1 truncate">تم التقديم بنجاح.</div>
-                        </div>
-                    ` + list.innerHTML.replace('جاري التحميل...', '').replace('لا توجد طلبات', '');
-                    
                     btn.innerHTML='تم التقديم'; btn.classList.add('opacity-50','cursor-not-allowed');
                     setTimeout(() => { switchSpecTab('requests'); openChatRoom(chatId, orgName, 'spec'); }, 1000);
                 } else {
@@ -978,14 +1043,6 @@
                 });
 
                 showToast('تم فتح قناة تواصل مع ' + specName);
-                const list = document.getElementById('org-requests-list');
-                list.innerHTML = `
-                    <div onclick="openChatRoom('${chatId}', '${specName}', 'org')" class="p-3 bg-white border border-blue-200 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors shadow-sm mb-2">
-                        <div class="font-bold text-slate-800 text-sm flex justify-between"><span>${specName}</span><span class="text-[10px] text-slate-500">الآن</span></div>
-                        <div class="text-xs text-slate-500 mt-1 truncate">تم فتح قناة تواصل.</div>
-                    </div>
-                ` + list.innerHTML.replace('جاري التحميل...', '').replace('لا توجد طلبات', '');
-                
                 switchOrgTab('messages'); openChatRoom(chatId, specName, 'org');
             } catch(e) { showToast('حدث خطأ أثناء فتح المحادثة', true); }
         };
@@ -996,27 +1053,42 @@
         let activeChatId = null; let activeChatRole = null; let chatUnsub = null; let currentChatOtherName = '';
         
         window.openChatRoom = (chatId, otherName, role) => {
-            activeChatId = chatId; activeChatRole = role; currentChatOtherName = otherName; const prefix = role === 'spec' ? 'spec' : 'org';
-            document.getElementById(`${prefix}-chat-empty`).classList.add('hidden'); document.getElementById(`${prefix}-chat-header`).classList.remove('hidden'); document.getElementById(`${prefix}-chat-form`).classList.remove('hidden'); document.getElementById(`${prefix}-chat-form`).classList.add('flex');
-            const nameEl = document.getElementById(`${prefix}-chat-${role==='spec'?'org':'spec'}-name`); if(nameEl) nameEl.innerText = otherName;
-            const msgsDiv = document.getElementById(`${prefix}-chat-messages`); msgsDiv.innerHTML = '<div class="text-center text-xs text-gray-400 my-4">جاري فتح القناة الآمنة...</div>';
+            // تنظيف: إلغاء الاشتراك في المحادثة السابقة قبل فتح الجديدة
+            if(chatUnsub) {
+                chatUnsub(); 
+                chatUnsub = null;
+            }
+
+            activeChatId = chatId; activeChatRole = role; currentChatOtherName = otherName; 
+            const prefix = role === 'spec' ? 'spec' : 'org';
             
-            if(chatUnsub) chatUnsub(); 
+            document.getElementById(`${prefix}-chat-empty`).classList.add('hidden'); 
+            document.getElementById(`${prefix}-chat-header`).classList.remove('hidden'); 
+            document.getElementById(`${prefix}-chat-form`).classList.remove('hidden'); 
+            document.getElementById(`${prefix}-chat-form`).classList.add('flex');
+            
+            const nameEl = document.getElementById(`${prefix}-chat-${role==='spec'?'org':'spec'}-name`); 
+            if(nameEl) nameEl.innerText = otherName;
+            
+            const msgsDiv = document.getElementById(`${prefix}-chat-messages`); 
+            msgsDiv.innerHTML = '<div class="text-center text-xs text-gray-400 my-4">جاري تحميل الرسائل...</div>';
+            
+            // الاشتراك في المحادثة الجديدة وتخزين دالة الإلغاء في chatUnsub
             chatUnsub = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), (snap) => {
                 const u = auth.currentUser; if(!u) return; let msgs = [];
                 snap.forEach(d => { const m = d.data(); m.id = d.id; if(m.chatId === chatId) msgs.push(m); }); 
                 msgs.sort((a,b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0)); 
 
                 if (msgs.length === 0) {
-                     msgsDiv.innerHTML = '<div class="text-center text-xs text-gray-400 my-4">لا توجد رسائل سابقة. ابدأ المحادثة الآن.</div>';
+                     msgsDiv.innerHTML = '<div class="text-center text-xs text-gray-400 my-4">لا توجد رسائل. ابدأ المحادثة الآن.</div>';
                      return;
                 }
 
-                msgsDiv.innerHTML = '<div class="text-center text-xs text-gray-400 my-4 font-bold">تم فتح قناة التواصل</div>';
+                msgsDiv.innerHTML = '<div class="text-center text-xs text-gray-400 my-4 font-bold">تم الاتصال بالقناة</div>';
                 msgs.forEach(m => {
                     const isMe = m.senderId === u.uid; const justify = isMe ? 'justify-end' : 'justify-start';
                     if(m.isContract) {
-                        const statusBadge = m.contractData.status === 'signed' ? '<span class="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">verified</span> عقد معتمد</span>' : '<span class="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">pending_actions</span> بانتظار توقيع الأخصائي</span>';
+                        const statusBadge = m.contractData.status === 'signed' ? '<span class="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">verified</span> عقد معتمد</span>' : '<span class="bg-orange-100 text-orange-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1"><span class="material-symbols-outlined text-[14px]">pending_actions</span> بانتظار التوقيع</span>';
                         let specAction = (role === 'spec' && m.contractData.status === 'pending') ? `<button onclick="openSignModal('${m.id}')" class="w-full mt-4 bg-primary text-white py-2 rounded-lg font-bold text-sm hover:bg-[#006d44] shadow-md">التوقيع والقبول</button>` : '';
                         msgsDiv.innerHTML += `<div class="flex justify-center mb-4 w-full"><div class="bg-white border-2 border-outline-variant shadow-lg rounded-2xl p-5 w-[90%] md:w-[75%]"><div class="flex justify-between items-center mb-4"><h4 class="font-bold text-primary text-lg flex items-center gap-2"><span class="material-symbols-outlined">description</span> عقد اتفاق</h4>${statusBadge}</div><div class="bg-surface-container-low p-3 rounded-xl mb-4 text-sm"><div class="grid grid-cols-2 gap-2 mb-2"><div>المشروع: <strong>${m.contractData.title}</strong></div><div>المدة: <strong>${m.contractData.duration}</strong></div></div><div>القيمة: <strong>${m.contractData.value} ر.س</strong></div></div><div class="mt-4 flex justify-between text-xs border-t pt-3"><div class="text-center"><p class="text-gray-500 mb-1">توقيع المنشأة</p><p class="font-bold text-primary text-lg">${m.contractData.orgSig}</p></div><div class="text-center"><p class="text-gray-500 mb-1">توقيع الأخصائي</p><p class="font-bold text-primary text-lg">${m.contractData.specSig || '<span class="text-gray-300">بانتظار التوقيع...</span>'}</p></div></div>${specAction}</div></div>`;
                     } else {
@@ -1025,7 +1097,7 @@
                     }
                 });
                 msgsDiv.scrollTop = msgsDiv.scrollHeight; 
-            });
+            }, (err) => console.error("Chat listener error:", err));
         };
 
         window.openContractModal = () => { document.getElementById('cont_title').value = ''; document.getElementById('cont_duration').value = ''; document.getElementById('cont_value').value = ''; document.getElementById('cont_org_sig').value = ''; document.getElementById('contract-modal').classList.remove('hidden-view'); document.getElementById('contract-modal').classList.add('flex'); };
